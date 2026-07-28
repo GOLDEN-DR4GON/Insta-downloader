@@ -6,9 +6,9 @@ services:
     buildCommand: |
       apt-get update
       apt-get install -y python3-pip python3
-      pip3 install --upgrade yt-dlp
-      which python3
-      python3 -m yt_dlp --version
+      pip3 install --upgrade pip
+      pip3 install yt-dlp
+      python3 -c "import yt_dlp; print('yt-dlp installed successfully')"
       npm install
     startCommand: |
       export PATH=$PATH:/usr/local/bin:/opt/render/.local/bin
