@@ -1,4 +1,4 @@
-// api/index.js - Instagram Reel Downloader (with full path)
+// api/index.js - Instagram Reel Downloader
 const express = require('express');
 const { exec } = require('child_process');
 const fs = require('fs');
@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 10000;
 
 app.use(express.json());
 
-// Helper to check if yt-dlp exists
+// Check if yt-dlp is available
 async function checkYtDlp() {
     try {
         await execPromise('python3 -c "import yt_dlp"', { timeout: 5000 });
@@ -33,7 +33,7 @@ app.get('/api', async (req, res) => {
 
     if (!url) {
         return res.status(200).json({
-            status: '✅ API Running on Render',
+            status: '✅ API Running on Render (Docker)',
             usage: '/api?url=INSTAGRAM_URL',
             example: '/api?url=https://www.instagram.com/reel/CxYz123AbCd/'
         });
@@ -49,8 +49,8 @@ app.get('/api', async (req, res) => {
         if (!hasYtDlp) {
             return res.status(500).json({
                 error: 'yt-dlp not installed',
-                fix: 'Run: pip3 install yt-dlp',
-                note: 'Check Render build logs for errors'
+                fix: 'Rebuild with Dockerfile',
+                note: 'Make sure Dockerfile is in the root directory'
             });
         }
 
@@ -59,10 +59,7 @@ app.get('/api', async (req, res) => {
 
         console.log(`📥 Downloading: ${url}`);
 
-        // Use python3 with full path
         const command = `python3 -m yt_dlp -f "best[ext=mp4]" -o "${filePath}" --no-playlist --quiet "${url}"`;
-        console.log(`Running: ${command}`);
-
         const { stdout, stderr } = await execPromise(command, { timeout: 60000 });
 
         if (stderr && !stderr.includes('WARNING')) {
@@ -124,5 +121,8 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server running on port ${PORT}`);
     checkYtDlp().then(has => {
         console.log(`yt-dlp available: ${has ? '✅' : '❌'}`);
+        if (!has) {
+            console.log('⚠️  yt-dlp not available! Check Dockerfile');
+        }
     });
 });
