@@ -4,9 +4,9 @@ services:
     env: node
     plan: free
     buildCommand: |
-      apt-get update
-      apt-get install -y python3-pip
-      pip3 install yt-dlp
+      apt-get update --allow-releaseinfo-change || true
+      apt-get install -y python3-pip --no-install-recommends || true
+      pip3 install yt-dlp --no-cache-dir || true
       npm install
     startCommand: npm start
     envVars:
