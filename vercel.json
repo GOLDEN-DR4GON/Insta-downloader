@@ -1,0 +1,16 @@
+{
+  "functions": {
+    "api.php": {
+      "runtime": "php@8.2"
+    },
+    "download.php": {
+      "runtime": "php@8.2"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/api.php"
+    }
+  ]
+}
