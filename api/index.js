@@ -1,4 +1,4 @@
-// api/index.js - Instagram Reel Downloader
+// api/index.js - Instagram Reel Downloader (with full path)
 const express = require('express');
 const { exec } = require('child_process');
 const fs = require('fs');
@@ -9,6 +9,21 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 app.use(express.json());
+
+// Helper to check if yt-dlp exists
+async function checkYtDlp() {
+    try {
+        await execPromise('python3 -c "import yt_dlp"', { timeout: 5000 });
+        return true;
+    } catch {
+        try {
+            await execPromise('which yt-dlp', { timeout: 5000 });
+            return true;
+        } catch {
+            return false;
+        }
+    }
+}
 
 app.get('/api', async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -29,36 +44,32 @@ app.get('/api', async (req, res) => {
     }
 
     try {
+        // Check if yt-dlp is available
+        const hasYtDlp = await checkYtDlp();
+        if (!hasYtDlp) {
+            return res.status(500).json({
+                error: 'yt-dlp not installed',
+                fix: 'Run: pip3 install yt-dlp',
+                note: 'Check Render build logs for errors'
+            });
+        }
+
         const fileId = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         const filePath = `/tmp/${fileId}.mp4`;
 
         console.log(`📥 Downloading: ${url}`);
 
-        // Try multiple methods to run yt-dlp
-        const commands = [
-            `python3 -m yt_dlp -f "best[ext=mp4]" -o "${filePath}" --no-playlist --quiet "${url}"`,
-            `yt-dlp -f "best[ext=mp4]" -o "${filePath}" --no-playlist --quiet "${url}"`,
-            `python3 -c "import yt_dlp; yt_dlp.main(['-f', 'best[ext=mp4]', '-o', '${filePath}', '--no-playlist', '--quiet', '${url}'])"`
-        ];
+        // Use python3 with full path
+        const command = `python3 -m yt_dlp -f "best[ext=mp4]" -o "${filePath}" --no-playlist --quiet "${url}"`;
+        console.log(`Running: ${command}`);
 
-        let lastError = null;
-        let success = false;
+        const { stdout, stderr } = await execPromise(command, { timeout: 60000 });
 
-        for (const command of commands) {
-            try {
-                console.log(`Trying: ${command.substring(0, 50)}...`);
-                const { stdout, stderr } = await execPromise(command, { timeout: 60000 });
-                if (fs.existsSync(filePath)) {
-                    success = true;
-                    break;
-                }
-            } catch (err) {
-                lastError = err;
-                console.log(`Command failed: ${err.message.substring(0, 100)}`);
-            }
+        if (stderr && !stderr.includes('WARNING')) {
+            console.error('stderr:', stderr);
         }
 
-        if (success && fs.existsSync(filePath)) {
+        if (fs.existsSync(filePath)) {
             const stats = fs.statSync(filePath);
             const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
 
@@ -76,13 +87,13 @@ app.get('/api', async (req, res) => {
             return res.status(200).json({
                 success: true,
                 file_size: fileSizeMB + ' MB',
-                message: 'File too large for base64.'
+                message: 'File too large for base64. Use a VPS for large files.'
             });
         }
 
         return res.status(500).json({ 
             error: 'Download failed',
-            details: lastError ? lastError.message : 'Unknown error'
+            details: stderr || 'File not created'
         });
 
     } catch (error) {
@@ -111,4 +122,7 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server running on port ${PORT}`);
+    checkYtDlp().then(has => {
+        console.log(`yt-dlp available: ${has ? '✅' : '❌'}`);
+    });
 });
