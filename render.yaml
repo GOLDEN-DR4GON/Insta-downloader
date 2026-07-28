@@ -1,6 +1,6 @@
 services:
   - type: web
     name: instagram-downloader
-    env: python
+    runtime: docker
     plan: free
-    buildCommand: pip install -r requirements.txt
+    dockerfilePath: Dockerfile
