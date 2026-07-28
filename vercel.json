@@ -1,10 +1,12 @@
 {
   "functions": {
-    "api/index.php": {
-      "runtime": "vercel-php@0.6.0"
+    "api/index.js": {
+      "runtime": "nodejs20.x",
+      "maxDuration": 60
     },
-    "api/download.php": {
-      "runtime": "vercel-php@0.6.0"
+    "api/download.js": {
+      "runtime": "nodejs20.x",
+      "maxDuration": 60
     }
   }
 }
