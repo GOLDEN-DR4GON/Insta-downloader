@@ -1,6 +1,7 @@
 services:
   - type: web
     name: instagram-downloader
-    runtime: docker
+    env: python  # ← Use Python, not Node!
     plan: free
-    dockerfilePath: Dockerfile
+    buildCommand: pip install -r requirements.txt
+    startCommand: python api/app.py
