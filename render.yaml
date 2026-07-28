@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: instagram-downloader
+    env: node
+    plan: free
+    buildCommand: apt-get update && apt-get install -y python3-pip && pip3 install yt-dlp && npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
