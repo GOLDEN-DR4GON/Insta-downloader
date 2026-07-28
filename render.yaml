@@ -3,8 +3,18 @@ services:
     name: instagram-downloader
     env: node
     plan: free
-    buildCommand: apt-get update && apt-get install -y python3-pip && pip3 install yt-dlp && npm install
-    startCommand: npm start
+    buildCommand: |
+      apt-get update
+      apt-get install -y python3-pip python3
+      pip3 install --upgrade yt-dlp
+      which python3
+      python3 -m yt_dlp --version
+      npm install
+    startCommand: |
+      export PATH=$PATH:/usr/local/bin:/opt/render/.local/bin
+      npm start
     envVars:
       - key: NODE_ENV
         value: production
+      - key: PYTHONUNBUFFERED
+        value: "1"
