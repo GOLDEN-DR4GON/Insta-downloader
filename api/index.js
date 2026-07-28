@@ -34,15 +34,31 @@ app.get('/api', async (req, res) => {
 
         console.log(`📥 Downloading: ${url}`);
 
-        // ✅ FIXED: Using python3 -m yt_dlp instead of yt-dlp
-        const command = `python3 -m yt_dlp -f "best[ext=mp4]" -o "${filePath}" --no-playlist --quiet "${url}"`;
-        const { stdout, stderr } = await execPromise(command, { timeout: 60000 });
+        // Try multiple methods to run yt-dlp
+        const commands = [
+            `python3 -m yt_dlp -f "best[ext=mp4]" -o "${filePath}" --no-playlist --quiet "${url}"`,
+            `yt-dlp -f "best[ext=mp4]" -o "${filePath}" --no-playlist --quiet "${url}"`,
+            `python3 -c "import yt_dlp; yt_dlp.main(['-f', 'best[ext=mp4]', '-o', '${filePath}', '--no-playlist', '--quiet', '${url}'])"`
+        ];
 
-        if (stderr && !stderr.includes('WARNING')) {
-            console.error('stderr:', stderr);
+        let lastError = null;
+        let success = false;
+
+        for (const command of commands) {
+            try {
+                console.log(`Trying: ${command.substring(0, 50)}...`);
+                const { stdout, stderr } = await execPromise(command, { timeout: 60000 });
+                if (fs.existsSync(filePath)) {
+                    success = true;
+                    break;
+                }
+            } catch (err) {
+                lastError = err;
+                console.log(`Command failed: ${err.message.substring(0, 100)}`);
+            }
         }
 
-        if (fs.existsSync(filePath)) {
+        if (success && fs.existsSync(filePath)) {
             const stats = fs.statSync(filePath);
             const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
 
@@ -60,11 +76,14 @@ app.get('/api', async (req, res) => {
             return res.status(200).json({
                 success: true,
                 file_size: fileSizeMB + ' MB',
-                message: 'File too large for base64. Use a VPS for large files.'
+                message: 'File too large for base64.'
             });
         }
 
-        return res.status(500).json({ error: 'Download failed' });
+        return res.status(500).json({ 
+            error: 'Download failed',
+            details: lastError ? lastError.message : 'Unknown error'
+        });
 
     } catch (error) {
         console.error('Error:', error);
