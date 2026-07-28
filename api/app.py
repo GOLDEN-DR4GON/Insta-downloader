@@ -1,67 +1,109 @@
-from flask import Flask, request, jsonify
-import subprocess, os, base64, time, re
+from flask import Flask, request, jsonify, send_file
+import subprocess
+import os
+import base64
+import time
+import re
+import io
 
 app = Flask(__name__)
 
-@app.route('/api')
-def download():
+@app.route('/api', methods=['GET'])
+def download_reel():
     url = request.args.get('url')
+    download = request.args.get('download', 'false').lower() == 'true'
     
     if not url:
         return jsonify({
-            'status': '✅ Ready',
-            'usage': '/api?url=INSTAGRAM_URL',
-            'note': 'For private reels, use cookies'
+            'status': '✅ API Running',
+            'usage': '/api?url=REEL_URL',
+            'auto_download': '/api?url=REEL_URL&download=true'
         })
     
     if not re.search(r'instagram\.com/(reel|p|tv)/[\w-]+', url):
-        return jsonify({'error': '❌ Invalid URL'}), 400
+        return jsonify({'error': '❌ Invalid Instagram URL'}), 400
     
     try:
-        fid = str(int(time.time()))
-        path = f'/tmp/{fid}.mp4'
+        file_id = str(int(time.time())) + '_' + os.urandom(4).hex()
+        file_path = f'/tmp/{file_id}.mp4'
         
-        # Add user-agent to avoid blocks
-        cmd = [
-            'yt-dlp',
-            '-f', 'best[ext=mp4]',
-            '-o', path,
-            '--no-playlist',
-            '--quiet',
-            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            url
-        ]
+        cmd = ['yt-dlp', '-f', 'best[ext=mp4]', '-o', file_path, '--no-playlist', '--quiet', url]
+        subprocess.run(cmd, timeout=120, capture_output=True)
         
-        result = subprocess.run(cmd, timeout=120, capture_output=True, text=True)
-        
-        if result.returncode != 0:
-            error_msg = result.stderr[:300]
-            return jsonify({'error': f'Download failed: {error_msg}'}), 500
-        
-        if os.path.exists(path) and os.path.getsize(path) > 0:
-            with open(path, 'rb') as f:
-                b64 = base64.b64encode(f.read()).decode()
-            os.unlink(path)
+        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+            # If download=true, send file directly
+            if download:
+                return send_file(
+                    file_path,
+                    as_attachment=True,
+                    download_name=f'reel_{file_id}.mp4',
+                    mimetype='video/mp4'
+                )
+            
+            # Otherwise return base64
+            with open(file_path, 'rb') as f:
+                content = base64.b64encode(f.read()).decode('utf-8')
+            os.unlink(file_path)
             return jsonify({
                 'success': True,
-                'file_base64': b64,
-                'message': '✅ Download successful!'
+                'file_base64': content,
+                'message': '✅ Download successful!',
+                'direct_download': f'/api?url={url}&download=true'
             })
         
-        return jsonify({'error': 'File not created'}), 500
+        return jsonify({'error': 'Download failed'}), 500
         
-    except subprocess.TimeoutExpired:
-        return jsonify({'error': 'Timeout'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/download', methods=['GET'])
+def download_direct():
+    """Direct download endpoint - even simpler!"""
+    url = request.args.get('url')
+    
+    if not url:
+        return jsonify({'error': 'URL required', 'usage': '/download?url=REEL_URL'}), 400
+    
+    if not re.search(r'instagram\.com/(reel|p|tv)/[\w-]+', url):
+        return jsonify({'error': '❌ Invalid Instagram URL'}), 400
+    
+    try:
+        file_id = str(int(time.time())) + '_' + os.urandom(4).hex()
+        file_path = f'/tmp/{file_id}.mp4'
+        
+        cmd = ['yt-dlp', '-f', 'best[ext=mp4]', '-o', file_path, '--no-playlist', '--quiet', url]
+        subprocess.run(cmd, timeout=120, capture_output=True)
+        
+        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+            return send_file(
+                file_path,
+                as_attachment=True,
+                download_name=f'reel_{file_id}.mp4',
+                mimetype='video/mp4'
+            )
+        
+        return jsonify({'error': 'Download failed'}), 500
+        
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/')
 def home():
     return jsonify({
-        'name': 'Reel Downloader',
-        'version': '3.0',
-        'endpoint': '/api?url=URL'
+        'name': 'Instagram Reel Downloader',
+        'version': '2.0.0',
+        'endpoints': {
+            'api': '/api?url=REEL_URL',
+            'auto_download': '/api?url=REEL_URL&download=true',
+            'direct_download': '/download?url=REEL_URL'
+        },
+        'usage': {
+            'base64': '/api?url=REEL_URL',
+            'auto_download': '/api?url=REEL_URL&download=true',
+            'simple_download': '/download?url=REEL_URL'
+        }
     })
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
