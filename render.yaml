@@ -1,7 +1,7 @@
 services:
   - type: web
     name: instagram-downloader
-    env: python  # ← Use Python, not Node!
+    env: python
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python api/app.py
