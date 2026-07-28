@@ -15,7 +15,7 @@ app.get('/api', async (req, res) => {
 
     if (!url) {
         return res.status(200).json({
-            status: '✅ API Running on Render',
+            status: '✅ API Running on Render (Docker)',
             usage: '/api?url=INSTAGRAM_URL'
         });
     }
