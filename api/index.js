@@ -1,4 +1,4 @@
-// api/index.js - Full server for Render
+// api/index.js - Instagram Reel Downloader
 const express = require('express');
 const { exec } = require('child_process');
 const fs = require('fs');
@@ -8,10 +8,8 @@ const execPromise = promisify(exec);
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Middleware
 app.use(express.json());
 
-// API endpoint
 app.get('/api', async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', 'application/json');
@@ -36,8 +34,13 @@ app.get('/api', async (req, res) => {
 
         console.log(`📥 Downloading: ${url}`);
 
-        const command = `yt-dlp -f "best[ext=mp4]" -o "${filePath}" --no-playlist --quiet "${url}"`;
-        await execPromise(command, { timeout: 60000 });
+        // ✅ FIXED: Using python3 -m yt_dlp instead of yt-dlp
+        const command = `python3 -m yt_dlp -f "best[ext=mp4]" -o "${filePath}" --no-playlist --quiet "${url}"`;
+        const { stdout, stderr } = await execPromise(command, { timeout: 60000 });
+
+        if (stderr && !stderr.includes('WARNING')) {
+            console.error('stderr:', stderr);
+        }
 
         if (fs.existsSync(filePath)) {
             const stats = fs.statSync(filePath);
@@ -72,12 +75,10 @@ app.get('/api', async (req, res) => {
     }
 });
 
-// Health check endpoint
 app.get('/health', (req, res) => {
     res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
-// Root endpoint
 app.get('/', (req, res) => {
     res.json({
         name: 'Instagram Reel Downloader',
@@ -89,7 +90,6 @@ app.get('/', (req, res) => {
     });
 });
 
-// Start server
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server running on port ${PORT}`);
 });
