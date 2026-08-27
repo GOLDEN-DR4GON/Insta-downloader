@@ -8,14 +8,17 @@ import tempfile
 import shutil
 import sys
 import json
-import random
-import string
-import hashlib
-from threading import Lock
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+from urllib.parse import urlparse
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+
+# ============================================================
+# SETUP
+# ============================================================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
 
 # ============================================================
 # INSTALL REQUESTS IF MISSING
@@ -26,487 +29,188 @@ except ImportError:
     subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'requests'])
     import requests
 
-app = Flask(__name__)
-
 # ============================================================
-# BROWSER_EMULATION_ENGINE – REAL SESSIONS
+# URL_EXTRACTOR
 # ============================================================
 
-class InstagramSessionManager:
-    """Manages real browser-emulated sessions"""
+def extract_shortcode(url):
+    """Extract Instagram shortcode from ANY URL"""
+    if not url:
+        return None
     
-    def __init__(self, pool_size=20):
-        self.pool_size = pool_size
-        self.sessions = []
-        self.lock = Lock()
-        self.current_index = 0
-        self._initialize_pool()
+    url = url.strip()
     
-    def _initialize_pool(self):
-        for i in range(self.pool_size):
-            session = self._create_real_session()
-            self.sessions.append(session)
-            time.sleep(0.1)  # Avoid rate limit during init
-    
-    def _create_real_session(self):
-        """Create a REAL browser session with proper TLS fingerprint"""
-        session = requests.Session()
-        
-        # Real browser TLS fingerprint (Chrome 120)
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"Windows"',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Upgrade-Insecure-Requests': '1',
-            'Connection': 'keep-alive',
-            'Cache-Control': 'max-age=0',
-            'Pragma': 'no-cache',
-        })
-        
-        # Generate cookies
-        session_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=32))
-        csrf_token = ''.join(random.choices(string.ascii_lowercase + string.digits, k=32))
-        ig_did = ''.join(random.choices(string.ascii_lowercase + string.digits, k=32))
-        mid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=32))
-        
-        session.cookies.set('ig_did', ig_did)
-        session.cookies.set('mid', mid)
-        session.cookies.set('csrftoken', csrf_token)
-        session.cookies.set('sessionid', session_id)
-        session.cookies.set('rur', 'PRN')
-        session.cookies.set('ds_user_id', str(random.randint(1000000, 9999999)))
-        
-        # Retry strategy
-        retry_strategy = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        session.mount('http://', adapter)
-        session.mount('https://', adapter)
-        
-        return {
-            'session': session,
-            'id': f"session_{int(time.time())}_{random.randint(1000,9999)}",
-            'last_used': 0,
-            'success_count': 0
-        }
-    
-    def get_session(self):
-        with self.lock:
-            # Find least used session
-            session = min(self.sessions, key=lambda s: s['success_count'])
-            
-            # Rotate if too many failures
-            if session['success_count'] > 20:
-                idx = self.sessions.index(session)
-                self.sessions[idx] = self._create_real_session()
-                session = self.sessions[idx]
-            
-            session['last_used'] = time.time()
-            session['success_count'] += 1
-            return session
-
-session_manager = InstagramSessionManager(pool_size=20)
-
-# ============================================================
-# INSTAGRAM_API_ENGINE – REQUEST-BASED EXTRACTION
-# ============================================================
-
-def get_instagram_shortcode(url):
-    """Extract shortcode from URL"""
     patterns = [
-        r'instagram\.com/(?:reel|p|tv|share)/([A-Za-z0-9_-]+)',
-        r'instagram\.com/[\w.]+\?igsh=([A-Za-z0-9_-]+)',
-        r'instagram\.com/p/([A-Za-z0-9_-]+)',
-        r'instagram\.com/reel/([A-Za-z0-9_-]+)',
+        r'(?:instagram\.com|instagr\.am)/(?:reel|p|tv|share)/([A-Za-z0-9_-]+)',
+        r'(?:instagram\.com|instagr\.am)/p/([A-Za-z0-9_-]+)',
+        r'(?:instagram\.com|instagr\.am)/reel/([A-Za-z0-9_-]+)',
+        r'(?:instagram\.com|instagr\.am)/([A-Za-z0-9_-]{8,})',
+        r'igshid=([A-Za-z0-9_-]+)',
     ]
+    
     for pattern in patterns:
-        match = re.search(pattern, url)
+        match = re.search(pattern, url, re.IGNORECASE)
         if match:
-            return match.group(1)
+            shortcode = match.group(1)
+            if shortcode and len(shortcode) >= 5:
+                return shortcode
+    
+    # Try path parsing
+    try:
+        parsed = urlparse(url)
+        if parsed.path:
+            parts = parsed.path.split('/')
+            for part in parts:
+                if part and len(part) >= 5 and re.match(r'^[A-Za-z0-9_-]+$', part):
+                    if part not in ['reel', 'p', 'tv', 'share']:
+                        return part
+    except:
+        pass
+    
     return None
 
-def get_instagram_reel_info(shortcode, session_data):
-    """Get reel info using REAL requests with proper headers"""
+# ============================================================
+# DOWNLOAD_ENGINE
+# ============================================================
+
+def download_instagram_video(url, output_path):
+    """Download Instagram video - returns (success, message)"""
     
-    session = session_data['session']
+    shortcode = extract_shortcode(url)
+    logger.info(f"🎯 Shortcode: {shortcode}")
     
-    # Try multiple endpoints
-    endpoints = [
-        f'https://www.instagram.com/api/v1/web/get_rulers/?media_id={shortcode}',
-        f'https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis',
-        f'https://www.instagram.com/api/graphql/',
-        f'https://i.instagram.com/api/v1/media/{shortcode}/info/',
-        f'https://www.instagram.com/p/{shortcode}/embed/captioned/',
-    ]
-    
-    for endpoint in endpoints:
+    # METHOD 1: GraphQL Direct
+    if shortcode:
+        logger.info("🔄 Method 1: GraphQL...")
         try:
-            # Update headers for each request
-            session.headers.update({
+            api_url = f'https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis'
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'application/json, text/plain, */*',
                 'X-Requested-With': 'XMLHttpRequest',
-                'X-CSRFToken': session.cookies.get('csrftoken', ''),
-                'X-IG-App-ID': '936619743392459',
-                'X-IG-WWW-Claim': '0',
-                'Origin': 'https://www.instagram.com',
                 'Referer': f'https://www.instagram.com/p/{shortcode}/',
-            })
+                'Cookie': f'ig_did={os.urandom(16).hex()}; mid={os.urandom(16).hex()}; csrftoken={os.urandom(16).hex()}',
+            }
             
-            response = session.get(endpoint, timeout=15, allow_redirects=True)
+            response = requests.get(api_url, headers=headers, timeout=15)
             
             if response.status_code == 200:
                 data = response.json()
+                video_url = None
                 
-                # Parse different response formats
-                video_urls = []
-                
-                # GraphQL format
-                if 'data' in data and 'shortcode_media' in data['data']:
-                    media = data['data']['shortcode_media']
-                    if 'video_url' in media:
-                        video_urls.append(media['video_url'])
-                    if 'edge_sidecar_to_children' in media:
-                        for edge in media['edge_sidecar_to_children']['edges']:
-                            if 'video_url' in edge['node']:
-                                video_urls.append(edge['node']['video_url'])
-                    if 'display_url' in media and 'video' in media and media['video']:
-                        # Sometimes video URL is in display_url
-                        if '.mp4' in media['display_url']:
-                            video_urls.append(media['display_url'])
-                
-                # __a=1 format
+                # Extract video URL
                 if 'graphql' in data and 'shortcode_media' in data['graphql']:
                     media = data['graphql']['shortcode_media']
                     if 'video_url' in media:
-                        video_urls.append(media['video_url'])
+                        video_url = media['video_url']
+                    elif 'edge_sidecar_to_children' in media:
+                        edges = media['edge_sidecar_to_children']['edges']
+                        if edges and 'video_url' in edges[0]['node']:
+                            video_url = edges[0]['node']['video_url']
                 
-                # API V1 format
-                if 'items' in data:
-                    for item in data['items']:
-                        if 'video_versions' in item:
-                            for version in item['video_versions']:
-                                if 'url' in version:
-                                    video_urls.append(version['url'])
-                        if 'video_url' in item:
-                            video_urls.append(item['video_url'])
-                        if 'carousel_media' in item:
-                            for carousel in item['carousel_media']:
-                                if 'video_versions' in carousel:
-                                    for version in carousel['video_versions']:
-                                        if 'url' in version:
-                                            video_urls.append(version['url'])
+                if video_url:
+                    logger.info(f"✅ Found video URL")
+                    return download_direct(video_url, output_path)
+        except Exception as e:
+            logger.warning(f"GraphQL failed: {str(e)}")
+    
+    # METHOD 2: yt-dlp
+    logger.info("🔄 Method 2: yt-dlp...")
+    
+    commands = [
+        ['yt-dlp', '-f', 'best[ext=mp4]', '-o', output_path, '--no-playlist', '--quiet', '--no-warnings', '--ignore-errors', '--force-ipv4', '--no-check-certificate', url],
+        ['yt-dlp', '-f', 'best[ext=mp4]', '-o', output_path, '--no-playlist', '--quiet', '--no-warnings', '--ignore-errors', '--user-agent', 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)', '--force-ipv4', '--no-check-certificate', url],
+        ['yt-dlp', '-f', 'best[ext=mp4]', '-o', output_path, '--no-playlist', '--quiet', '--ignore-errors', '--cookies-from-browser', 'chrome', '--force-ipv4', '--no-check-certificate', url],
+    ]
+    
+    for i, cmd in enumerate(commands, 1):
+        try:
+            result = subprocess.run(cmd, timeout=120, capture_output=True, text=True)
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                logger.info(f"✅ yt-dlp success (attempt {i})")
+                return True, f"yt-dlp method {i}"
+        except Exception as e:
+            logger.warning(f"yt-dlp attempt {i} failed: {str(e)}")
+    
+    # METHOD 3: Page Extraction
+    if shortcode:
+        logger.info("🔄 Method 3: Page extraction...")
+        try:
+            page_url = f'https://www.instagram.com/p/{shortcode}/'
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            }
+            
+            response = requests.get(page_url, headers=headers, timeout=15)
+            if response.status_code == 200:
+                html = response.text
                 
-                # Embed format
-                if 'video_url' in data:
-                    video_urls.append(data['video_url'])
+                patterns = [
+                    r'"video_url":"([^"]+)"',
+                    r'"video_versions":\[\{"url":"([^"]+)"',
+                    r'<meta property="og:video" content="([^"]+)"',
+                    r'https://[a-zA-Z0-9.-]+\.cdninstagram\.com/[^"\']+\.mp4[^"\']*',
+                ]
                 
-                # Clean and return first valid URL
-                for video_url in video_urls:
-                    if video_url:
-                        video_url = video_url.replace('\\/', '/')
+                for pattern in patterns:
+                    matches = re.findall(pattern, html)
+                    for match in matches:
+                        video_url = match.replace('\\/', '/')
                         if video_url.startswith('//'):
                             video_url = 'https:' + video_url
-                        if video_url.startswith('http') and ('.mp4' in video_url or 'video' in video_url or 'cdninstagram' in video_url):
-                            return video_url, endpoint
-                
+                        if video_url.startswith('http') and ('.mp4' in video_url or 'cdninstagram' in video_url):
+                            logger.info(f"✅ Found in page")
+                            return download_direct(video_url, output_path)
         except Exception as e:
-            continue
+            logger.warning(f"Page extraction failed: {str(e)}")
     
-    return None, None
+    return False, "All methods failed"
 
-def get_video_from_oembed(shortcode):
-    """oEmbed API - works often"""
-    try:
-        url = f'https://graph.facebook.com/v18.0/instagram_oembed?url=https://www.instagram.com/p/{shortcode}/'
-        
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        })
-        
-        response = session.get(url, timeout=15)
-        
-        if response.status_code == 200:
-            data = response.json()
-            # oEmbed doesn't give video URL, but gives thumbnail
-            if 'thumbnail_url' in data:
-                thumbnail = data['thumbnail_url']
-                # Try to convert thumbnail URL to video URL
-                video_url = thumbnail.replace('/s150x150/', '/video/').replace('.jpg', '.mp4')
-                return video_url
-    except:
-        pass
-    return None
-
-def get_video_from_instagram_direct(shortcode):
-    """Direct page extraction with proper session"""
+def download_direct(video_url, output_path):
+    """Direct download with retry"""
     
-    # Get a fresh session
-    session_data = session_manager.get_session()
-    session = session_data['session']
-    
-    try:
-        url = f'https://www.instagram.com/p/{shortcode}/'
-        
-        # Update headers for HTML request
-        session.headers.update({
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-        })
-        
-        response = session.get(url, timeout=20)
-        
-        if response.status_code == 200:
-            html = response.text
-            
-            # Extract video URL from page
-            patterns = [
-                r'"video_url":"([^"]+)"',
-                r'"video_versions":\[\{"url":"([^"]+)"',
-                r'"playable_url":"([^"]+)"',
-                r'"source":"([^"]+\.mp4[^"]*)"',
-                r'<meta property="og:video" content="([^"]+)"',
-                r'<meta property="og:video:url" content="([^"]+)"',
-                r'<video[^>]+src="([^"]+\.mp4[^"]*)"',
-                r'https://[a-zA-Z0-9.-]+\.cdninstagram\.com/[^"\']+\.mp4[^"\']*',
-            ]
-            
-            for pattern in patterns:
-                matches = re.findall(pattern, html)
-                for match in matches:
-                    video_url = match.replace('\\/', '/')
-                    if video_url.startswith('//'):
-                        video_url = 'https:' + video_url
-                    if video_url.startswith('http') and ('.mp4' in video_url or 'cdninstagram' in video_url):
-                        return video_url
-            
-            # Try to find in JSON-LD
-            json_ld_pattern = r'<script type="application/ld\+json">(.*?)</script>'
-            json_ld_matches = re.findall(json_ld_pattern, html, re.DOTALL)
-            
-            for json_str in json_ld_matches:
-                try:
-                    data = json.loads(json_str)
-                    if 'video' in data and 'contentUrl' in data['video']:
-                        return data['video']['contentUrl']
-                    if 'contentUrl' in data:
-                        return data['contentUrl']
-                except:
-                    continue
-    
-    except Exception as e:
-        print(f"Direct extraction error: {str(e)}")
-    
-    return None
-
-def download_video_with_requests(video_url, output_path):
-    """Download using requests with proper resume support"""
-    
-    for attempt in range(5):
+    for attempt in range(3):
         try:
-            # Rotate user agents
-            user_agents = [
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-            ]
-            
-            session = requests.Session()
-            session.headers.update({
-                'User-Agent': random.choice(user_agents),
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'video/mp4,video/webm,video/*;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'identity',  # No compression for video
+                'Accept-Encoding': 'identity',
                 'Connection': 'keep-alive',
                 'Referer': 'https://www.instagram.com/',
-                'Origin': 'https://www.instagram.com',
-                'Range': 'bytes=0-',
-            })
+            }
             
-            # Add random delay to avoid detection
-            time.sleep(random.uniform(0.5, 1.5))
+            # Resume support
+            resume_byte = 0
+            if os.path.exists(output_path):
+                resume_byte = os.path.getsize(output_path)
+                if resume_byte > 0:
+                    headers['Range'] = f'bytes={resume_byte}-'
             
-            response = session.get(video_url, timeout=60, stream=True)
+            response = requests.get(video_url, headers=headers, timeout=60, stream=True)
             
             if response.status_code in [200, 206]:
-                # Check if we can resume
-                resume_byte = 0
-                if os.path.exists(output_path):
-                    resume_byte = os.path.getsize(output_path)
-                    if resume_byte > 0:
-                        session.headers.update({'Range': f'bytes={resume_byte}-'})
-                        response = session.get(video_url, timeout=60, stream=True)
-                
-                total_size = int(response.headers.get('content-length', 0))
                 mode = 'ab' if resume_byte > 0 else 'wb'
-                
                 with open(output_path, mode) as f:
-                    downloaded = resume_byte
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
-                            downloaded += len(chunk)
-                            if total_size > 0:
-                                progress = int((downloaded / (total_size + resume_byte)) * 100)
-                                if progress % 10 == 0:
-                                    print(f"Download progress: {progress}%")
                 
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                    return True, f"Downloaded {os.path.getsize(output_path)} bytes"
+                    logger.info(f"✅ Downloaded: {os.path.getsize(output_path)} bytes")
+                    return True, "Download successful"
             
-            # Exponential backoff
             time.sleep(2 ** attempt)
             
         except Exception as e:
-            print(f"Download attempt {attempt+1} failed: {str(e)}")
+            logger.warning(f"Download attempt {attempt+1} failed: {str(e)}")
             time.sleep(2 ** attempt)
     
-    return False, "Download failed after 5 attempts"
-
-def download_instagram_ultimate_v3(url, output_path):
-    """ULTIMATE V3 - REQUESTS + REAL SESSIONS + MULTI-ENDPOINT"""
-    
-    shortcode = get_instagram_shortcode(url)
-    if not shortcode:
-        return False, "Invalid shortcode"
-    
-    print(f"🎯 Processing: {shortcode}")
-    
-    video_url = None
-    method_used = ""
-    
-    # Method 1: Multi-endpoint GraphQL with session rotation
-    print("🔄 Method 1: GraphQL endpoints...")
-    for i in range(5):  # Try 5 different sessions
-        session_data = session_manager.get_session()
-        video_url, endpoint = get_instagram_reel_info(shortcode, session_data)
-        if video_url:
-            method_used = f"GraphQL ({endpoint}) with session {i+1}"
-            print(f"✅ Found: {method_used}")
-            break
-        print(f"⚠️ Session {i+1} failed, retrying...")
-        time.sleep(0.5)
-    
-    # Method 2: oEmbed
-    if not video_url:
-        print("🔄 Method 2: oEmbed...")
-        video_url = get_video_from_oembed(shortcode)
-        if video_url:
-            method_used = "oEmbed"
-            print(f"✅ Found via {method_used}")
-    
-    # Method 3: Direct page extraction
-    if not video_url:
-        print("🔄 Method 3: Direct page extraction...")
-        for i in range(3):
-            video_url = get_video_from_instagram_direct(shortcode)
-            if video_url:
-                method_used = f"Direct page (attempt {i+1})"
-                print(f"✅ Found via {method_used}")
-                break
-            time.sleep(1)
-    
-    # Method 4: yt-dlp with requests session cookies
-    if not video_url:
-        print("🔄 Method 4: yt-dlp with session...")
-        for i in range(3):
-            session_data = session_manager.get_session()
-            session = session_data['session']
-            
-            # Export cookies for yt-dlp
-            cookie_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-            try:
-                cookie_file.write("# Netscape HTTP Cookie File\n")
-                for cookie in session.cookies:
-                    cookie_file.write(f".instagram.com\tTRUE\t/\tFALSE\t{int(time.time()) + 86400*30}\t{cookie.name}\t{cookie.value}\n")
-                cookie_file.close()
-                
-                cmd = [
-                    'yt-dlp',
-                    '-f', 'best[ext=mp4]',
-                    '-o', output_path,
-                    '--no-playlist',
-                    '--quiet',
-                    '--no-warnings',
-                    '--ignore-errors',
-                    '--cookies', cookie_file.name,
-                    '--user-agent', session.headers.get('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'),
-                    '--add-header', f'Accept-Language: en-US,en;q=0.9',
-                    '--socket-timeout', '30',
-                    '--retries', '10',
-                    '--fragment-retries', '10',
-                    '--force-ipv4',
-                    '--no-check-certificate',
-                    url
-                ]
-                
-                result = subprocess.run(cmd, timeout=120, capture_output=True, text=True)
-                os.unlink(cookie_file.name)
-                
-                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                    return True, f"yt-dlp with session {i+1}"
-                
-            except Exception as e:
-                try:
-                    os.unlink(cookie_file.name)
-                except:
-                    pass
-                print(f"yt-dlp attempt {i+1} failed: {str(e)}")
-                continue
-    
-    # Download if video URL found
-    if video_url:
-        print(f"📥 Downloading: {video_url[:100]}...")
-        success, msg = download_video_with_requests(video_url, output_path)
-        if success:
-            return True, f"{method_used} + smart download"
-        print(f"Download failed: {msg}")
-    
-    # Final fallback: Try public proxy extraction
-    print("🔄 Final fallback: Public proxy extraction...")
-    try:
-        # Use a public proxy to fetch the page
-        proxy_url = "https://api.allorigins.win/raw?url=" + urllib.parse.quote(f"https://www.instagram.com/p/{shortcode}/")
-        
-        response = requests.get(proxy_url, timeout=30)
-        if response.status_code == 200:
-            html = response.text
-            
-            # Extract video URL
-            video_urls = re.findall(r'"video_url":"([^"]+)"', html)
-            if video_urls:
-                video_url = video_urls[0].replace('\\/', '/')
-                if video_url.startswith('//'):
-                    video_url = 'https:' + video_url
-                success, msg = download_video_with_requests(video_url, output_path)
-                if success:
-                    return True, f"Proxy extraction + download"
-    except:
-        pass
-    
-    return False, "All bypass methods exhausted"
-
-# ============================================================
-# FLASK ENDPOINTS
-# ============================================================
+    return False, "Download failed"
 
 def ensure_ytdlp():
+    """Ensure yt-dlp is installed"""
     try:
         subprocess.run(['yt-dlp', '--version'], capture_output=True, check=True, timeout=10)
         return True
@@ -518,161 +222,182 @@ def ensure_ytdlp():
         except:
             return False
 
-@app.route('/api', methods=['GET'])
-def download_reel():
-    url = request.args.get('url')
-    download = request.args.get('download', 'false').lower() == 'true'
-    
-    if not url:
-        return jsonify({
-            'status': '✅ ULTIMATE BYPASS V3',
-            'usage': '/api?url=REEL_URL',
-            'auto_download': '/api?url=REEL_URL&download=true',
-            'version': '7.0.0_REQUESTS',
-            'features': [
-                '20 rotating sessions',
-                'Requests library with proper TLS',
-                '5 GraphQL endpoints',
-                'oEmbed, Direct page, Proxy fallback',
-                'Smart download with resume',
-                'Real browser emulation'
-            ]
-        })
-    
-    if not re.search(r'instagram\.com/(reel|p|tv|share)/[\w-]+', url):
-        return jsonify({'error': '❌ Invalid Instagram URL'}), 400
-    
-    ensure_ytdlp()
-    
-    temp_dir = tempfile.mkdtemp()
-    file_id = f"{int(time.time())}_{os.urandom(4).hex()}"
-    file_path = os.path.join(temp_dir, f'{file_id}.mp4')
-    
-    try:
-        print(f"\n{'='*70}")
-        print(f"🚀 DOWNLOADING: {url}")
-        print(f"🔄 SESSION POOL: {session_manager.pool_size} active")
-        print(f"{'='*70}\n")
-        
-        success, message = download_instagram_ultimate_v3(url, file_path)
-        
-        if success and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-            if download:
-                return send_file(
-                    file_path,
-                    as_attachment=True,
-                    download_name=f'reel_{file_id}.mp4',
-                    mimetype='video/mp4'
-                )
-            
-            with open(file_path, 'rb') as f:
-                content = base64.b64encode(f.read()).decode('utf-8')
-            
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return jsonify({
-                'success': True,
-                'file_base64': content,
-                'message': '✅ Download successful!',
-                'file_size': os.path.getsize(file_path),
-                'method': message,
-                'engine': 'REQUESTS_V3',
-                'session_pool': session_manager.pool_size,
-                'direct_download': f'/api?url={url}&download=true',
-                'simple_download': f'/download?url={url}'
-            })
-        
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return jsonify({
-            'error': 'Download failed',
-            'details': message,
-            'bypass_status': 'All methods attempted with requests',
-            'suggestions': [
-                'This reel might be private (public reels only)',
-                'Instagram may have temporary rate-limited you',
-                'Try again in 30 seconds',
-                'Try a different public reel'
-            ]
-        }), 500
-        
-    except Exception as e:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return jsonify({
-            'error': str(e),
-            'status': 'REQUESTS_ACTIVE'
-        }), 500
+# ============================================================
+# API ONLY ENDPOINTS
+# ============================================================
+
+@app.route('/', methods=['GET'])
+def root():
+    """API info"""
+    return jsonify({
+        'service': 'Instagram Downloader API',
+        'version': '1.0.0',
+        'status': 'online',
+        'endpoints': {
+            '/download': 'GET - Download video file (use ?url=URL)',
+            '/api': 'GET - Get video info/JSON (use ?url=URL&format=json|file)',
+            '/': 'GET - This info'
+        },
+        'example': {
+            'file': '/download?url=https://www.instagram.com/reel/ABC123/',
+            'json': '/api?url=https://www.instagram.com/reel/ABC123/',
+            'base64': '/api?url=https://www.instagram.com/reel/ABC123/&format=base64'
+        }
+    })
 
 @app.route('/download', methods=['GET'])
-def download_direct():
-    url = request.args.get('url')
-    if not url:
-        return jsonify({'error': 'URL required'}), 400
+def download_file():
+    """Direct file download endpoint"""
     
-    if not re.search(r'instagram\.com/(reel|p|tv|share)/[\w-]+', url):
-        return jsonify({'error': 'Invalid URL'}), 400
+    url = request.args.get('url')
+    
+    if not url:
+        return jsonify({
+            'error': 'Missing URL parameter',
+            'usage': '/download?url=INSTAGRAM_URL'
+        }), 400
+    
+    shortcode = extract_shortcode(url)
+    if not shortcode:
+        return jsonify({
+            'error': 'Invalid Instagram URL',
+            'provided': url
+        }), 400
+    
+    logger.info(f"🚀 Downloading: {shortcode}")
     
     ensure_ytdlp()
+    
     temp_dir = tempfile.mkdtemp()
-    file_id = f"{int(time.time())}_{os.urandom(4).hex()}"
-    file_path = os.path.join(temp_dir, f'{file_id}.mp4')
+    output_path = os.path.join(temp_dir, f'{shortcode}.mp4')
     
     try:
-        success, message = download_instagram_ultimate_v3(url, file_path)
+        success, message = download_instagram_video(url, output_path)
         
-        if success and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+        if success and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            file_size = os.path.getsize(output_path)
+            logger.info(f"✅ Success: {file_size} bytes")
+            
             return send_file(
-                file_path,
+                output_path,
                 as_attachment=True,
-                download_name=f'reel_{file_id}.mp4',
+                download_name=f'{shortcode}.mp4',
                 mimetype='video/mp4'
             )
         
         shutil.rmtree(temp_dir, ignore_errors=True)
-        return jsonify({'error': 'Download failed'}), 500
+        return jsonify({
+            'error': 'Download failed',
+            'reason': message,
+            'shortcode': shortcode
+        }), 500
+        
     except Exception as e:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"❌ Error: {str(e)}")
+        return jsonify({
+            'error': str(e),
+            'shortcode': shortcode
+        }), 500
 
-@app.route('/')
-def home():
-    return jsonify({
-        'name': 'Instagram REQUESTS Bypass Engine',
-        'version': '7.0.0_REQUESTS',
-        'status': '✅ ULTIMATE BYPASS ACTIVE',
-        'engine': 'REQUESTS + SESSION_POOL + GRAPHQL_V2',
-        'features': {
-            'session_pool': '20 rotating sessions',
-            'http_library': 'requests (proper TLS)',
-            'graphql_endpoints': '5 different endpoints',
-            'fallback_methods': ['oEmbed', 'Direct page', 'Proxy', 'yt-dlp'],
-            'download': 'Resumable with 5 retries'
-        },
-        'endpoints': {
-            'api': '/api?url=REEL_URL',
-            'auto_download': '/api?url=REEL_URL&download=true',
-            'direct_download': '/download?url=REEL_URL'
-        },
-        'no_auth_required': True,
-        'success_rate': '99.5% for public reels',
-        'requirements': ['Flask', 'requests', 'yt-dlp']
-    })
-
-if __name__ == '__main__':
-    print("=" * 80)
-    print("🔥 INSTAGRAM REQUESTS ENGINE V7.0.0")
-    print("🔥 STATUS: ULTIMATE")
-    print("🔥 FEATURES:")
-    print("   • 20 rotating sessions (real browser emulation)")
-    print("   • Requests library (proper TLS fingerprint)")
-    print("   • 5 GraphQL endpoints + 3 fallbacks")
-    print("   • Resumable downloads with 5 retries")
-    print("   • Proxy fallback for ultimate reliability")
-    print("=" * 80)
+@app.route('/api', methods=['GET'])
+def api_download():
+    """API endpoint with multiple formats"""
+    
+    url = request.args.get('url')
+    format_type = request.args.get('format', 'json')
+    
+    if not url:
+        return jsonify({
+            'error': 'Missing URL parameter',
+            'usage': '/api?url=INSTAGRAM_URL&format=json|file|base64',
+            'example': '/api?url=https://www.instagram.com/reel/ABC123/'
+        }), 400
+    
+    shortcode = extract_shortcode(url)
+    if not shortcode:
+        return jsonify({
+            'error': 'Invalid Instagram URL',
+            'provided': url
+        }), 400
     
     ensure_ytdlp()
+    
+    temp_dir = tempfile.mkdtemp()
+    output_path = os.path.join(temp_dir, f'{shortcode}.mp4')
+    
+    try:
+        success, message = download_instagram_video(url, output_path)
+        
+        if success and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            file_size = os.path.getsize(output_path)
+            
+            # Option 1: Direct file download
+            if format_type == 'file':
+                return send_file(
+                    output_path,
+                    as_attachment=True,
+                    download_name=f'{shortcode}.mp4',
+                    mimetype='video/mp4'
+                )
+            
+            # Option 2: Base64 encoded
+            with open(output_path, 'rb') as f:
+                content = base64.b64encode(f.read()).decode('utf-8')
+            
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            
+            if format_type == 'base64':
+                return jsonify({
+                    'success': True,
+                    'shortcode': shortcode,
+                    'file_size': file_size,
+                    'base64': content
+                })
+            
+            # Default: JSON with metadata (base64 truncated for large files)
+            return jsonify({
+                'success': True,
+                'shortcode': shortcode,
+                'file_size': file_size,
+                'file_name': f'{shortcode}.mp4',
+                'base64_preview': content[:200] + '...' if len(content) > 200 else content,
+                'download_url': f'/download?url={url}',
+                'method': message
+            })
+        
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return jsonify({
+            'success': False,
+            'error': 'Download failed',
+            'reason': message,
+            'shortcode': shortcode
+        }), 500
+        
+    except Exception as e:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'shortcode': shortcode
+        }), 500
+
+if __name__ == '__main__':
+    print("=" * 60)
+    print("🔥 INSTAGRAM DOWNLOADER API")
+    print("🔥 STATUS: ONLINE")
+    print("🔥 MODE: API ONLY")
+    print("=" * 60)
+    
+    ensure_ytdlp()
+    
     port = int(os.environ.get('PORT', 10000))
-    print(f"\n🚀 SERVER: 0.0.0.0:{port}")
-    print(f"🔄 SESSION POOL: {session_manager.pool_size} active")
-    print("🎯 BYPASS: REQUESTS_ULTIMATE")
-    print("\n" + "=" * 80 + "\n")
+    print(f"\n🚀 Server: http://0.0.0.0:{port}")
+    print(f"\n📌 Endpoints:")
+    print(f"   GET /download?url=URL  → Download video file")
+    print(f"   GET /api?url=URL       → Get JSON metadata")
+    print(f"   GET /api?url=URL&format=file  → Download file")
+    print(f"   GET /api?url=URL&format=base64 → Get base64")
+    print("\n" + "=" * 60 + "\n")
     
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
