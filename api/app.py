@@ -4,11 +4,9 @@ import os
 import base64
 import time
 import re
-import io
 import json
 import tempfile
 import shutil
-import requests
 
 app = Flask(__name__)
 
@@ -70,7 +68,7 @@ def download_reel():
             'status': '✅ API Running',
             'usage': '/api?url=REEL_URL',
             'auto_download': '/api?url=REEL_URL&download=true',
-            'version': '2.0.0'
+            'version': '2.0.1'
         })
     
     # More comprehensive URL validation
@@ -212,7 +210,7 @@ def home():
         },
         'requirements': {
             'yt-dlp': 'Installed and updated automatically',
-            'dependencies': 'Flask, requests, yt-dlp'
+            'dependencies': 'Flask, yt-dlp'
         },
         'notes': [
             'Public reels only - private reels require login',
